@@ -1,0 +1,103 @@
+---
+title: "Daymet"
+format: html
+---
+
+# Setup  
+```{r}
+#| message: false
+#| warning: false
+
+#install.packages("sf")
+#install.packages("daymetr")
+#install.packages("remotes")
+#remotes::install_github("ropensci/USAboundaries")
+#remotes::install_github("ropensci/USAboundariesData")
+
+library(tidyverse)
+library(USAboundaries) # for US state boundaries
+library(sf) # for US map
+library(daymetr)
+```
+
+```{r}
+train_meta <- read_csv("../data/training/training_meta.csv")
+
+train_meta
+```
+
+```{r}
+daymet_all <- train_meta %>%
+  mutate(
+    weather = pmap(
+      list(year, site, latitude, longitude),
+      function(.y, .site, .lat, .lon) {
+
+        # 🚫 skip invalid coords BEFORE API call
+        if (is.na(.lat) || is.na(.lon) ||
+            .lat < 14 || .lat > 83 ||
+            .lon < -180 || .lon > -50) {
+          return(NULL)
+        }
+
+        # 🛡️ safe download
+        tryCatch({
+          daymetr::download_daymet(
+            site = paste0(.site, "_", .y),
+            lat = .lat,
+            lon = .lon,
+            start = .y,
+            end = .y,
+            internal = TRUE,
+            silent = TRUE
+          )$data %>%
+            as_tibble() %>%
+            mutate(site = .site, year = .y)
+
+        }, error = function(e) NULL)
+      }
+    )
+  )
+
+beepr::beep()
+
+daymet_all %>% (head)
+
+daymet_all$weather[1]
+
+```
+
+
+Now let's unnest the weather column.  
+```{r}
+daymet_all %>% 
+  unnest(weather) #%>%
+  
+
+pivot_wider(names_from = measurement,
+              values_from = value
+              ) %>%
+    janitor::clean_names()
+
+```
+Now, unnest the weather variable
+```{r}
+daymet_all_unnest <- daymet_all_unnes %>% 
+  unnest(dayl_s:vp_pa)
+
+daymet_all_unnest
+```
+
+
+
+
+# Exporting  
+  
+```{r}
+write_csv(daymet_all_unnest,
+          "../data/fieldd12weatherdata.csv"
+          )
+```
+
+ 
+

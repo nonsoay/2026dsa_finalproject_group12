@@ -1,0 +1,162 @@
+---
+title: "Feature Engineering"
+format: html
+---
+
+
+#-----------FITTING RANDOM FOREST------------
+```{r}
+rf_spec <- rand_forest(
+  trees = 1000,
+  mtry = 10,
+  min_n = 5
+) %>%
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("regression")
+
+rf_wf <- workflow() %>%
+  add_recipe(corn_recipe_rf) %>%
+  add_model(rf_spec)
+
+rf_fit <- fit(rf_wf, data = train_dev)
+
+rf_pred_2023 <- predict(rf_fit, test_2023) %>%
+  bind_cols(test_2023 %>% 
+              select(site, year, hybrid, yield))
+
+rf_metrics <- metrics(rf_pred_2023, truth = yield, estimate = .pred)
+rf_metrics
+```
+
+
+```{r}
+xgb_rmse <- xgb_metrics %>% filter(.metric == "rmse") %>% pull(.estimate)
+xgb_rsq  <- xgb_metrics %>% filter(.metric == "rsq") %>% pull(.estimate)
+
+ggplot(xgb_pred_2023, aes(x = yield, y = .pred)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    title = "XGBoost: Predicted vs Observed Yield",
+    subtitle = paste0("RMSE = ", round(xgb_rmse, 2), " | R² = ", round(xgb_rsq, 3)),
+    x = "Observed Yield",
+    y = "Predicted Yield"
+  ) +
+  theme_minimal()
+```
+
+
+
+# Setup  
+```{r}
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(readxl) # to read excel files
+library(janitor) # to clean data
+library(dplyr) # wrangling
+library(tidyr) # wrangling
+library(readr) # to export csv
+
+
+here::here()
+knitr::purl("2_featureeng_partial.qmd", output = "2_sapelo_script.R", documentation = 0)
+```
+
+```{r}
+fieldweather <- read_csv("../data/fieldd12weatherdata.csv")
+
+soil <- read_csv("../data/training/training_soil.csv")
+
+trait <- read_csv("../data/training/training_trait.csv")
+
+summary(fieldweather)
+summary(soil)
+summary(trait)
+
+```
+
+
+Seperate site column in fieldsoil data into site and year and use site column to join the three dataset into one for ease of working with one dataset
+```{r}
+fieldsoil <- soil %>%
+  separate(site, into = c("site", "year"), sep = "_") %>% 
+  mutate(year = as.double(year)) #to keep the joining coulmn all in same data type in the different datset
+```
+
+
+```{r}
+fe_month <- fieldweather %>%
+  # Selecting needed variables
+  dplyr::select(year, site, lat, lon,
+                yday,
+                dayl.s = dayl_s, 
+                prcp.mm = prcp_mm_day,
+                srad.wm2 = srad_w_m_2, 
+                tmax.c = tmax_deg_c, 
+                tmin.c = tmin_deg_c,
+                vp.pa = vp_pa
+                ) %>%
+  # Creating a date class variable  
+  mutate(date_chr = paste0(year, "/", yday)) %>%
+  mutate(date = as.Date(date_chr, "%Y/%j")) %>%
+  # Extracting month from date  
+  mutate(month = month(date)) %>%
+  mutate(month_abb = month(date, label = T))
+```
+
+```{r}
+fe_month_sum <- fe_month %>%
+  group_by(year, site, month_abb) %>%
+  summarise(across(.cols = c(dayl.s,
+                             srad.wm2,
+                             tmax.c,
+                             tmin.c,
+                             vp.pa
+                             ),
+                   .fns = mean, 
+                   .names = "mean_{.col}"
+                   ),
+            across(.cols = prcp.mm,
+                   .fns = sum,
+                   .names = "sum_{.col}"
+                   )
+            ) %>%
+  ungroup()
+```
+
+```{r}
+fieldprp <- fe_month_sum %>% 
+  left_join(fieldsoil, 
+            by = c("year", "site")
+            ) %>% 
+  left_join(trait,
+            by = c("year", "site")
+            )
+
+```
+
+
+# EDA  
+```{r}
+summary(fieldprp)
+```
+
+Let's select important variables/columns
+```{r}
+fieldprpty <- fieldprp %>% 
+  dplyr::select(dayl_s:grain_moisture, -replicate, -block, -hybrid, -date_planted, -date_harvested)
+```
+
+
+Let's create some density plots to explore the weather data distributions.  
+```{r}
+
+fieldprpty %>%
+  pivot_longer(cols = dayl_s:grain_moisture) %>%
+  ggplot(aes(x = value)) +
+  geom_density() +
+  facet_wrap(~name, scales = "free")
+
+```

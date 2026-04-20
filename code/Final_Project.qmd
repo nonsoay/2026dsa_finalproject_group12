@@ -1,0 +1,866 @@
+---
+title: "Final Proejct"
+format: html
+editor: visual
+---
+
+# ----------LOAD TRAINING DATA------------
+```{r}
+#| message: false
+#| warning: false
+
+train_meta <- read_csv("../data/training/training_meta.csv") %>% 
+  janitor::clean_names() 
+train_trait <- read_csv("../data/training/training_trait.csv") %>% 
+  janitor::clean_names() 
+train_soil <- read_csv("../data/training/training_soil.csv") %>% 
+  janitor::clean_names()
+
+
+train_full <- train_trait %>%
+  left_join(train_meta, by = c("site", "year"))
+
+
+#correct some coordinates
+train_full <- train_full %>% 
+  mutate(
+    longitude = if_else(longitude > 0 & longitude < 180, -longitude, longitude)
+  )
+```
+
+
+```{r}
+# #-----------------DOWNLOAD WEATHER DATA------------------
+# 
+daymet_all <- train_full %>%
+    mutate(weather = pmap(list(year, site, latitude, longitude),
+                        function(.y, .site, .lat, .lon) {
+                          tryCatch({
+                            daymetr::download_daymet(
+                              site = paste0(.site, "_", .y),
+                              lat = .lat,
+                              lon = .lon,
+                              start = .y,
+                              end = .y,
+                              internal = T,
+                              silent = T,
+                              simplify = T)$data %>%
+                              as_tibble()}, error = function(e) NULL) }
+                        ))
+
+beepr::beep()
+```
+
+
+```{r}
+#---------------------UNNEST AND SAVE WEATHER DATA-------------------
+
+daymet_all_unnes <- daymet_all %>%
+  unnest(weather) %>%
+  pivot_wider(names_from = measurement,
+              values_from = value
+              ) %>%
+    janitor::clean_names()
+
+head(daymet_all_unnes)
+
+daymet_all_unnest <- daymet_all_unnes %>% #full unnesting
+  unnest(dayl_s:vp_pa)
+
+head(daymet_all_unnest)
+# Exporting
+
+write_csv(daymet_all_unnest,
+          "../data/weatherdata.csv"
+          )
+```
+
+
+#------CONTINUE LOADING DATA--------------
+```{r}
+#| message: false
+#| warning: false
+
+train_weather <- read_csv("../data/weatherdata.csv") %>% 
+  clean_names()
+```
+
+
+#-----------CLEAN META--------------
+```{r}
+#| message: false
+#| warning: false
+ train_meta <- train_meta %>%
+ mutate(previous_crop = str_to_lower(previous_crop)) 
+```
+
+
+
+# -------------MERGE TRAINING DATA------------
+```{r}
+#| message: false
+#| warning: false
+
+train_full <- train_weather %>%
+    left_join(train_soil, by = c("site", "year")) %>% 
+
+
+
+
+head(train_full)
+summary(train_full$year)
+table(train_full$site)
+```
+
+#-------------GROUP BY SITE_YEAR AND CONVERT PREDICTORS AS FACTORS---------------------
+```{r }
+#| message: false
+#| warning: false
+
+train_full <- train_full %>%
+  mutate(site_year = paste(site, year, sep = "_")) %>%
+  mutate(
+    site_year     = factor(site_year),
+    hybrid        = factor(hybrid),
+    previous_crop = factor(previous_crop),
+    site          = factor(site)
+  )
+```
+
+
+```{r }
+#| message: false
+#| warning: false
+
+parse_mdy_year <- function(x, year) {
+    suppressWarnings(
+    lubridate::mdy(paste(x, year))
+  )
+}
+
+# count of predictor columns BEFORE recipe steps
+n_pred <- train_full %>%
+  select(-yield_mg_ha, -site_year) %>%
+  ncol()
+
+n_pred
+```
+
+#--------NOW LET US DEFINE THE RECIPE TO USE-----
+
+```{r}
+#| message: false
+#| warning: false
+
+soybean_recipe <- recipe(
+  yield_mg_ha ~ year + site + replicate + block + hybrid + date_planted + date_harvested + 
+    grain_moisture + previous_crop + longitude + latitude + soilp_h + om_pct + soilk_ppm + soilp_ppm,  data = train_full) %>%
+  
+  step_string2factor(all_nominal_predictors()) %>%
+  
+  # Create Date variables from the character date columns
+  step_mutate(
+    planted_date   = mdy(date_planted),
+    harvested_date = mdy(date_harvested)
+  ) %>%
+  
+  # Engineer numeric date features
+  step_mutate(
+    doy_planted      = yday(planted_date),
+    doy_harvested    = yday(harvested_date),
+    harvest_interval = as.numeric(harvested_date - planted_date)
+  ) %>%
+  
+  # Remove original string and intermediate Date columns
+  step_rm(date_planted, date_harvested, planted_date, harvested_date) %>%
+  
+  # Impute missing numeric and categorical data
+  step_impute_median(all_numeric_predictors()) %>%   # numeric median imputation[web:37][web:43]
+  step_impute_mode(all_nominal_predictors()) %>%     # mode imputation for factors[web:40]
+  
+  # Dummy encode categorical predictors
+  step_dummy(all_nominal_predictors())
+
+soybean_recipe
+```
+
+#---------------RESAMPLING GROUP---------------
+```{r}
+#| message: false
+#| message: false
+
+set.seed(5253626)
+
+cv_folds <- group_vfold_cv(
+  train_full,
+  group = site_year,
+  v = 10
+)
+
+soybean_recipe
+cv_folds
+
+```
+
+#----------------------LET'S TUNE THE MODEL XGBOOST HYPERPARAMETERS-----------------------
+
+```{r}
+#| message: false
+#| message: false
+
+
+xgboost_m <- boost_tree(
+  trees          = 1000,
+  tree_depth     = tune(),
+  learn_rate     = tune(),
+  loss_reduction = tune(),
+  min_n          = tune(),
+  sample_size    = tune(),
+  mtry           = tune()
+) %>%
+  set_mode("regression") %>%
+  set_engine("xgboost")
+
+xgboost_m
+```
+
+
+#---------------- THE MODEL WORKFLOW------------------------------
+
+```{r}
+#| message: false
+#| message: false
+
+xgboost_wrkflow <- workflow() %>%
+  add_model(xgboost_m) %>%
+  add_recipe(soybean_recipe)
+
+```
+
+## ----------------GRID TUNE-----------------------
+
+```{r}
+#| message: false
+#| message: false
+
+set.seed(5253626)
+
+xgboost_grid_tune <- grid_space_filling(
+  tree_depth(),
+  learn_rate(range = c(-3, -0.5)),  
+  loss_reduction(),
+  min_n(),
+  sample_size = sample_prop(),
+  mtry(range = c(6, min(50, n_pred))),
+  size = 30
+)
+
+```
+
+#---------------- CV TUNNING--------------
+
+```{r}
+#| message: false
+#| message: false
+
+set.seed(5253626)
+
+xgboost_tune <- xgboost_grid_tune(
+  xgboost_wrkflow,
+  resamples = cv_folds,
+  grid      = xgboost_grid_tune,
+  metrics   = metric_set(rmse, rsq),
+  control   = control_grid(save_pred = TRUE)
+)
+
+collect_metrics(xgboost_tune) %>%
+  filter(.metric == "rmse") %>%
+  arrange(mean)
+
+```
+
+#-------------CHECKING BEST XGBOOST PARAMETERS-------------------
+
+```{r}
+best_xgboost <- select_best(xgboost_tune, metric = "rmse")
+
+# Finalize the workflow
+xgboost_final_wrkflow <- finalize_workflow(xgb_wf, best_xgb)
+```
+
+#----------PREDICTING 2024--------------
+
+```{r}
+xgboost_final_fit <- fit(xgboost_final_wrkflow, data = train_full)
+
+xgboost_predict <- predict(xgboost_final_fit, new_data = test_full) %>%
+  bind_cols(test_full %>% select(year, site, hybrid)) %>%
+  rename(pred_yield_mg_ha = .pred)
+
+xgboost_predict
+```
+
+
+
+
+
+## **Specify a random forest model**
+
+```{r}
+# rf_spec <- rand_forest(
+#   mtry  = tune(),   # number of predictors tried at each split (we'll tune)
+#   trees = 500,      # reasonable default number of trees
+#   min_n = tune()    # minimum data points in a terminal node
+# ) %>%
+#   set_mode("regression") %>%
+#   set_engine("ranger", importance = "impurity")
+
+
+rf_spec <- rand_forest(
+  mtry  = 20,     # heuristic; can adjust later
+  trees = 500,
+  min_n = 5
+) %>%
+  set_mode("regression") %>%
+  set_engine("ranger", importance = "impurity")
+```
+
+## **Build a workflow (recipe + model)**
+
+```{r}
+corn_wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(corn_rec)
+
+corn_wf
+```
+
+## **Evaluate with grouped CV (no tuning)**
+
+```{r}
+set.seed(123)
+
+rf_res <- fit_resamples(
+  corn_wf,
+  resamples = cv_folds,
+  metrics   = metric_set(rmse, rsq),
+  control   = control_resamples(save_pred = TRUE)
+)
+
+collect_metrics(rf_res)
+```
+
+## **Fit final model on all training data and predict on test**
+
+```{r}
+final_fit <- fit(corn_wf, data = train_df)
+```
+
+# Generate predictions for 2024
+
+```{r}
+test_pred <- predict(final_fit, new_data = test_df) %>%
+  bind_cols(test_df %>% select(year, site, hybrid))
+
+# Rename prediction column
+test_pred <- test_pred %>%
+  rename(pred_yield_mg_ha = .pred)
+
+test_pred
+
+write_csv(test_pred, "../output/corn_yield_predictions_rf.csv")
+```
+
+## **Set up tuning grid and metrics**
+
+```{r}
+# metrics
+corn_metrics <- metric_set(rmse, rsq)  # yardstick metrics for numeric outcomes[web:93][web:90]
+
+# a small tuning grid
+rf_grid <- grid_regular(
+  mtry(range = c(5L, 50L)),   # you can widen later
+  min_n(range = c(5L, 25L)),
+  levels = 5                  # 5x5 = 25 combos
+)
+```
+
+## **Tune with grouped CV**
+
+```{r}
+# training step
+set.seed(123)
+
+rf_tuned <- tune_grid(
+  corn_wf,
+  resamples = cv_folds,
+  grid      = rf_grid,
+  metrics   = corn_metrics,
+  control   = control_grid(save_pred = TRUE)
+)
+
+rf_tuned
+```
+
+# inspect results
+
+```{r}
+collect_metrics(rf_tuned) %>%
+  arrange(mean)
+```
+
+## **best parameters and finalize**
+
+```{r}
+# picks the parameter combination with lowest RMSE over the resamples.
+best_rf <- select_best(rf_tuned, metric = "rmse")
+best_rf
+
+final_wf <- finalize_workflow(corn_wf, best_rf)
+final_wf
+```
+
+
+
+```{r }
+#| message: false
+#| warning: false
+# ------------AGGREGATE TRAINING TRAITS-------------
+train_trait_clean <- train_trait %>%
+  mutate(
+    date_planted = mdy(date_planted),
+    date_harvested = mdy(date_harvested)
+  ) %>%
+  group_by(site, year, hybrid) %>%
+  summarize(
+    yield = mean(yield_mg_ha, na.rm = TRUE),
+    grain_moisture = mean(grain_moisture, na.rm = TRUE),
+    date_planted = min(date_planted, na.rm = TRUE),
+    date_harvested = max(date_harvested, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+
+# Load packages
+
+```{r}
+#| message: false
+#| message: false
+
+library(tidymodels)
+library(tidyverse)
+library(recipes)  # step_rm, step_impute_* etc.
+library(lubridate)
+library(ranger)
+library(rsample)
+```
+
+# Loading and inspecting the training and testing files
+
+```{r}
+#| message: false
+#| message: false
+
+# list.files("../data/training", full.names = TRUE)
+# list.files("../data/testing", full.names = TRUE)
+
+```
+
+## **Read all 6 CSVs**
+
+```{r}
+#| message: false
+#| message: false
+
+train_meta  = read_csv("../data/training/training_meta.csv")
+train_soil  = read_csv("../data/training/training_soil.csv")
+train_trait = read_csv("../data/training/training_trait.csv")
+
+test_meta   = read_csv("../data/testing/testing_meta.csv")
+test_soil   = read_csv("../data/testing/testing_soil.csv")
+test_sub    = read_csv("../data/testing/testing_submission.csv")
+```
+
+# Inspect column names
+
+```{r}
+#| message: false
+#| message: false
+
+# names(train_meta)
+# names(train_soil)
+# names(train_trait)
+# 
+# names(test_meta)
+# names(test_soil)
+# names(test_sub)
+```
+
+## **Join meta and soil into trait/submission**
+
+```{r}
+#| message: false
+#| message: false
+
+# Combine META and SOIL for training and testing data
+train_env = train_meta %>%
+  left_join(train_soil, by = c("year", "site"))
+
+test_env = test_meta %>%
+  left_join(test_soil, by = c("year", "site"))
+
+# Add env info to trait
+train_df = train_trait %>%
+  left_join(train_env, by = c("year", "site"))
+
+test_df = test_sub %>%
+  left_join(test_env, by = c("year", "site"))
+
+# checks 
+glimpse(train_df)
+glimpse(test_df)
+
+# EDA
+summary(train_df$yield_mg_ha)
+table(train_df$year)
+table(train_df$site)
+```
+
+## **Site-year grouping variable for CV use**
+
+```{r}
+#| message: false
+#| message: false
+
+train_df = train_df %>%
+  mutate(site_year = paste(site, year, sep = "_"))
+train_df
+
+test_df = test_df %>%
+  mutate(site_year = paste(site, year, sep = "_"))
+test_df
+```
+
+## **Tidymodels and set-up of recipe**
+
+```{r}
+#| message: false
+#| message: false
+
+# convert character predictors to factors
+train_df <- train_df %>%
+  mutate(
+    site          = factor(site),
+    hybrid        = factor(hybrid),
+    previous_crop = factor(previous_crop),
+    site_year     = factor(site_year)
+  )
+
+test_df <- test_df %>%
+  mutate(
+    site          = factor(site),
+    hybrid        = factor(hybrid),
+    previous_crop = factor(previous_crop),
+    site_year     = factor(site_year)
+  )
+
+# date parsing helper funvtion (month/day/year to Date)
+parse_mdy_year <- function(x, year) {
+  # x is like "5/5/14"; we know the numeric year column separately
+  # so we coerce using lubridate::mdy with paste
+  suppressWarnings(
+    lubridate::mdy(paste(x, year))
+  )
+}
+
+# count of predictor columns BEFORE recipe steps
+n_pred <- train_df %>%
+  select(-yield_mg_ha, -site_year) %>%
+  ncol()
+
+n_pred
+
+```
+
+# Define a recipe using yield_mg_ha as outcome
+
+```{r}
+#| message: false
+#| message: false
+
+corn_rec <- recipe(
+  yield_mg_ha ~ year + site + replicate + block + hybrid +
+    date_planted + date_harvested +
+    grain_moisture +
+    previous_crop + longitude + latitude +
+    soilpH + om_pct + soilk_ppm + soilp_ppm,
+  data = train_df
+) %>%
+  # Convert character predictors to factors
+  step_string2factor(all_nominal_predictors()) %>%
+  
+  # Create Date variables from the character date columns
+  step_mutate(
+    planted_date   = mdy(date_planted),
+    harvested_date = mdy(date_harvested)
+  ) %>%
+  
+  # Engineer numeric date features
+  step_mutate(
+    doy_planted      = yday(planted_date),
+    doy_harvested    = yday(harvested_date),
+    harvest_interval = as.numeric(harvested_date - planted_date)
+  ) %>%
+  
+  # Remove original string and intermediate Date columns
+  step_rm(date_planted, date_harvested, planted_date, harvested_date) %>%
+  
+  # Impute missing numeric and categorical data
+  step_impute_median(all_numeric_predictors()) %>%   # numeric median imputation[web:37][web:43]
+  step_impute_mode(all_nominal_predictors()) %>%     # mode imputation for factors[web:40]
+  
+  # Dummy encode categorical predictors
+  step_dummy(all_nominal_predictors())
+
+corn_rec
+
+```
+
+## **Create grouped resampling**
+
+```{r}
+#| message: false
+#| message: false
+
+set.seed(123)
+
+cv_folds <- group_vfold_cv(
+  train_df,
+  group = site_year,
+  v = 5
+)
+
+corn_rec
+cv_folds
+
+```
+
+## **Tuned XGBoost model with grouped CV**
+
+```{r}
+#| message: false
+#| message: false
+
+# XGBoost spec with tunable hyperparameters
+xgb_spec <- boost_tree(
+  trees          = 1000,
+  tree_depth     = tune(),
+  learn_rate     = tune(),
+  loss_reduction = tune(),
+  min_n          = tune(),
+  sample_size    = tune(),
+  mtry           = tune()
+) %>%
+  set_mode("regression") %>%
+  set_engine("xgboost")
+
+xgb_spec
+```
+
+# XGBoost workflow
+
+```{r}
+#| message: false
+#| message: false
+
+xgb_wf <- workflow() %>%
+  add_model(xgb_spec) %>%
+  add_recipe(corn_rec)
+
+xgb_wf
+```
+
+## **Tuning grid**
+
+```{r}
+#| message: false
+#| message: false
+
+set.seed(123)
+
+# Use a Latin space‑filling over a sensible range.
+xgb_grid <- grid_space_filling(
+  tree_depth(),
+  learn_rate(range = c(-3, -0.5)),  # on log10 scale: 10^-3 to ~10^-0.5
+  loss_reduction(),
+  min_n(),
+  sample_size = sample_prop(),
+  mtry(range = c(5, min(50, n_pred))),  # use the n_pred counted from train_df
+  size = 30
+)
+
+xgb_grid
+```
+
+# Tune with grouped CV
+
+```{r}
+set.seed(123)
+
+xgb_tuned <- tune_grid(
+  xgb_wf,
+  resamples = cv_folds,
+  grid      = xgb_grid,
+  metrics   = metric_set(rmse, rsq),
+  control   = control_grid(save_pred = TRUE)
+)
+
+xgb_tuned
+
+collect_metrics(xgb_tuned) %>%
+  filter(.metric == "rmse") %>%
+  arrange(mean)
+
+```
+
+# XGB best parameters
+
+```{r}
+best_xgb <- select_best(xgb_tuned, metric = "rmse")
+best_xgb
+
+# Finalize the workflow
+final_xgb_wf <- finalize_workflow(xgb_wf, best_xgb)
+```
+
+# Fit on all training data and predict 2024
+
+```{r}
+final_xgb_fit <- fit(final_xgb_wf, data = train_df)
+
+xgb_preds <- predict(final_xgb_fit, new_data = test_df) %>%
+  bind_cols(test_df %>% select(year, site, hybrid)) %>%
+  rename(pred_yield_mg_ha = .pred)
+
+xgb_preds
+```
+
+
+
+
+## **Specify a random forest model**
+
+```{r}
+# rf_spec <- rand_forest(
+#   mtry  = tune(),   # number of predictors tried at each split (we'll tune)
+#   trees = 500,      # reasonable default number of trees
+#   min_n = tune()    # minimum data points in a terminal node
+# ) %>%
+#   set_mode("regression") %>%
+#   set_engine("ranger", importance = "impurity")
+
+
+rf_spec <- rand_forest(
+  mtry  = 20,     # heuristic; can adjust later
+  trees = 500,
+  min_n = 5
+) %>%
+  set_mode("regression") %>%
+  set_engine("ranger", importance = "impurity")
+```
+
+## **Build a workflow (recipe + model)**
+
+```{r}
+corn_wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(corn_rec)
+
+corn_wf
+```
+
+## **Evaluate with grouped CV (no tuning)**
+
+```{r}
+set.seed(123)
+
+rf_res <- fit_resamples(
+  corn_wf,
+  resamples = cv_folds,
+  metrics   = metric_set(rmse, rsq),
+  control   = control_resamples(save_pred = TRUE)
+)
+
+collect_metrics(rf_res)
+```
+
+## **Fit final model on all training data and predict on test**
+
+```{r}
+final_fit <- fit(corn_wf, data = train_df)
+```
+
+# Generate predictions for 2024
+
+```{r}
+test_pred <- predict(final_fit, new_data = test_df) %>%
+  bind_cols(test_df %>% select(year, site, hybrid))
+
+# Rename prediction column
+test_pred <- test_pred %>%
+  rename(pred_yield_mg_ha = .pred)
+
+test_pred
+
+write_csv(test_pred, "../output/corn_yield_predictions_rf.csv")
+```
+
+## **Set up tuning grid and metrics**
+
+```{r}
+# metrics
+corn_metrics <- metric_set(rmse, rsq)  # yardstick metrics for numeric outcomes[web:93][web:90]
+
+# a small tuning grid
+rf_grid <- grid_regular(
+  mtry(range = c(5L, 50L)),   # you can widen later
+  min_n(range = c(5L, 25L)),
+  levels = 5                  # 5x5 = 25 combos
+)
+```
+
+## **Tune with grouped CV**
+
+```{r}
+# training step
+set.seed(123)
+
+rf_tuned <- tune_grid(
+  corn_wf,
+  resamples = cv_folds,
+  grid      = rf_grid,
+  metrics   = corn_metrics,
+  control   = control_grid(save_pred = TRUE)
+)
+
+rf_tuned
+```
+
+# inspect results
+
+```{r}
+collect_metrics(rf_tuned) %>%
+  arrange(mean)
+```
+
+## **best parameters and finalize**
+
+```{r}
+# picks the parameter combination with lowest RMSE over the resamples.
+best_rf <- select_best(rf_tuned, metric = "rmse")
+best_rf
+
+final_wf <- finalize_workflow(corn_wf, best_rf)
+final_wf
+```
