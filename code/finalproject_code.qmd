@@ -64,9 +64,7 @@ train_trait_clean <- train_trait %>%
 head(train_trait_clean)
 ```
 
-
 # -------------MERGE------------
-
 ```{r}
 #| message: false
 #| warning: false
@@ -77,7 +75,6 @@ train_full <- train_trait_clean %>%
   mutate(across(soilp_h:soilp_ppm, as.numeric))
 
 ```
-
 
 # ----------LOAD TESTING DATA------------
 ```{r}
@@ -178,7 +175,6 @@ test_full <- test_full %>%
   )
 ```
 
-
 #-----FILLING IN MISSING DATE OF YEAR VALUES-------
 ```{r}
 #| message: false
@@ -188,7 +184,6 @@ test_full <- test_full %>%
 global_plant_doy <- round(median(train_full$plant_doy, na.rm = T))
 global_harvest_doy <- round(median(train_full$harvest_doy, na.rm = T))
 ```
-
 
 #------ADDING MISSING VALUES TO TRAINING AND TESTING DATA-------
 ```{r}
@@ -207,7 +202,6 @@ test_full <- test_full %>%
   )
 ```
 
-
 #-------CREATING A SITE-YEAR LIST-------
 ```{r}
 #| message: false
@@ -222,7 +216,6 @@ all_site_years <- bind_rows(
 head(all_site_years)
 ```
 
-
 #---------FIXING ANY POS LONGITUDE NUMBERS (NORTH AMERICA HAS NEG LONGITUDE)--------
 ```{r}
   all_site_years <- all_site_years %>%
@@ -231,106 +224,98 @@ head(all_site_years)
    )
 ```
 
-<!-- #----------PULLING DAYMET DATA---------- -->
-<!-- ```{r} -->
-<!-- get_daymet_one <- function(site, year, lat, lon) { -->
-<!--   tryCatch({ -->
-<!--     out <- download_daymet( -->
-<!--       site = paste0(site, "_", year), -->
-<!--       lat = lat, -->
-<!--       lon = lon, -->
-<!--       start = year, -->
-<!--       end = year, -->
-<!--       internal = T, -->
-<!--       silent = T -->
-<!--     ) -->
+#----------PULLING DAYMET DATA---------- -->
+```{r}
+get_daymet_one <- function(site, year, lat, lon) {
+  tryCatch({
+    out <- download_daymet(
+      site = paste0(site, "_", year),
+      lat = lat,
+      lon = lon,
+      start = year,
+      end = year,
+      internal = TRUE,
+      silent = TRUE
+    )
 
-<!--     out$data %>% -->
-<!--       as_tibble() %>% -->
-<!--       mutate(site = site, year = year) -->
+    out$data %>%
+      as_tibble() %>%
+      mutate(
+        site = site,
+        year = year
+      )
+  }, error = function(e) {
+    message(paste("Skipping:", site, year, "lat =", lat, "lon =", lon))
+    return(NULL)
+  })
+}
 
-<!--   }, error = function(e) { -->
-<!--     message(paste("Skipping:", site, year)) -->
-<!--     return(NULL) -->
-<!--   }) -->
-<!-- } -->
+weather_list <- purrr::pmap(
+  all_site_years,
+  ~ get_daymet_one(site = ..1, year = ..2, lat = ..3, lon = ..4)
+)
 
+weather_daily <- bind_rows(weather_list)
 
+```
 
-<!-- weather_list <- purrr::pmap( -->
-<!--   all_site_years, -->
-<!--   ~ get_daymet_one(site = ..1, year = ..2, lat = ..3, lon = ..4) -->
-<!-- ) -->
+#------------FEATURE ENGINEERING WEATHER VARIABLES------------
+```{r}
+weather_daily <- weather_daily %>%
+  mutate(
+    tmean = (tmax..deg.c. + tmin..deg.c.) / 2,
+    tmax_cap = pmin(tmax..deg.c., 30),
+    tmin_cap = pmax(tmin..deg.c., 10),
+    gdd10_30 = pmax(((tmax_cap + tmin_cap) / 2) - 10, 0),
+    hot_day_32 = as.integer(tmax..deg.c. > 32),
+    hot_night_21 = as.integer(tmin..deg.c. > 21),
+    dry_day = as.integer(prcp..mm.day. < 1),
+    rad_mj_m2 = (srad..W.m.2. * dayl..s.) / 1e6
+  )
+```
 
-<!-- weather_daily <- bind_rows(weather_list) -->
-<!-- ``` -->
+#-----------SUMMARIZE WEATHER VARIABLES------------
+```{r}
+weather_features <- weather_daily %>%
+  mutate(
+    tmean = (tmax..deg.c. + tmin..deg.c.) / 2,
+    gdd = pmax(tmean - 10, 0),
+    hot_days = as.integer(tmax..deg.c. > 32),
+    hot_nights = as.integer(tmin..deg.c. > 21),
+    dry_day = as.integer(prcp..mm.day. < 1),
+    rad_mj_m2 = (srad..W.m.2. * dayl..s.) / 1e6
+  ) %>%
+  group_by(site, year) %>%
+  summarize(
+    mean_temp = mean(tmean, na.rm = TRUE),
+    max_temp = max(tmax..deg.c., na.rm = TRUE),
+    min_temp = min(tmin..deg.c., na.rm = TRUE),
+    total_prcp = sum(prcp..mm.day., na.rm = TRUE),
+    rain_days = sum(prcp..mm.day. >= 1, na.rm = TRUE),
+    hot_days = sum(hot_days, na.rm = TRUE),
+    hot_nights = sum(hot_nights, na.rm = TRUE),
+    gdd = sum(gdd, na.rm = TRUE),
+    total_radiation = sum(rad_mj_m2, na.rm = TRUE),
+    mean_vp = mean(vp..Pa., na.rm = TRUE),
+    .groups = "drop"
+  )
+```
 
-<!-- ```{r} -->
-<!-- names(weather_daily) -->
-<!-- ``` -->
+#-------ADDING WEATHER TO TRAINING AND TESTING DATA------- -->
+```{r}
+train_full <- train_full %>%
+  left_join(weather_features, by = c("site", "year"))
 
-<!-- #------------FEATURE ENGINEERING WEATHER VARIABLES------------ -->
-<!-- ```{r} -->
-<!-- weather_daily <- weather_daily %>% -->
-<!--   mutate( -->
-<!--     tmean = (tmax..deg.c. + tmin..deg.c.) / 2, -->
-<!--     tmax_cap = pmin(tmax..deg.c., 30), -->
-<!--     tmin_cap = pmax(tmin..deg.c., 10), -->
-<!--     gdd10_30 = pmax(((tmax_cap + tmin_cap) / 2) - 10, 0), -->
-<!--     hot_day_32 = as.integer(tmax..deg.c. > 32), -->
-<!--     hot_night_21 = as.integer(tmin..deg.c. > 21), -->
-<!--     dry_day = as.integer(prcp..mm.day. < 1), -->
-<!--     rad_mj_m2 = (srad..W.m.2. * dayl..s.) / 1e6 -->
-<!--   ) -->
-<!-- ``` -->
+test_full <- test_full %>%
+  left_join(weather_features, by = c("site", "year"))
+```
 
+#-----------SAVING THE FINISHED AND CLEAN DATA--------- -->
+```{r}
+write_csv(train_full, "../data/train_full_weather.csv")
+write_csv(test_full, "../data/test_full_weather.csv")
+```
 
-<!-- #-----------SUMMARIZE WEATHER VARIABLES------------ -->
-<!-- ```{r} -->
-<!-- weather_features <- weather_daily %>% -->
-<!--   mutate( -->
-<!--     tmean = (tmax..deg.c. + tmin..deg.c.) / 2, -->
-<!--     gdd = pmax(tmean - 10, 0), -->
-<!--     hot_days = as.integer(tmax..deg.c. > 32), -->
-<!--     hot_nights = as.integer(tmin..deg.c. > 21), -->
-<!--     dry_day = as.integer(prcp..mm.day. < 1), -->
-<!--     rad_mj_m2 = (srad..W.m.2. * dayl..s.) / 1e6 -->
-<!--   ) %>% -->
-<!--   group_by(site, year) %>% -->
-<!--   summarize( -->
-<!--     mean_temp = mean(tmean, na.rm = T), -->
-<!--     max_temp = max(tmax..deg.c., na.rm = T), -->
-<!--     min_temp = min(tmin..deg.c., na.rm = T), -->
-
-<!--     total_prcp = sum(prcp..mm.day., na.rm = T), -->
-<!--     rain_days = sum(prcp..mm.day. >= 1, na.rm = T), -->
-
-<!--     hot_days = sum(hot_days, na.rm = T), -->
-<!--     hot_nights = sum(hot_nights, na.rm = T), -->
-
-<!--     gdd = sum(gdd, na.rm = T), -->
-<!--     total_radiation = sum(rad_mj_m2, na.rm = T), -->
-<!--     mean_vp = mean(vp..Pa., na.rm = T), -->
-
-<!--     .groups = "drop" -->
-<!--   ) -->
-<!-- ``` -->
-
-<!-- #-------ADDING WEATHER TO TRAINING AND TESTING DATA------- -->
-<!-- ```{r} -->
-<!-- train_full <- train_full %>% -->
-<!--   left_join(weather_features, by = c("site", "year")) -->
-
-<!-- test_full <- test_full %>% -->
-<!--   left_join(weather_features, by = c("site", "year")) -->
-<!-- ``` -->
-
-
-<!-- #-----------SAVING THE FINISHED AND CLEAN DATA--------- -->
-<!-- ```{r} -->
-<!-- write_csv(train_full, "../data/train_full_weather.csv") -->
-<!-- write_csv(test_full, "../data/test_full_weather.csv") -->
-<!-- ``` -->
 
 #--------LOADING FINISHED DATA SETS-------
 ```{r}
@@ -338,6 +323,24 @@ train_full <- read_csv("../data/train_full_weather.csv")
 test_full  <- read_csv("../data/test_full_weather.csv")
 ```
 
+#----------CATEGORICAL TO NUMERICAL------------
+```{r}
+train_full <- train_full %>%
+  mutate(
+    soilp_h = as.numeric(soilp_h),
+    om_pct = as.numeric(om_pct),
+    soilk_ppm = as.numeric(soilk_ppm),
+    soilp_ppm = as.numeric(soilp_ppm)
+  )
+
+test_full <- test_full %>%
+  mutate(
+    soilp_h = as.numeric(soilp_h),
+    om_pct = as.numeric(om_pct),
+    soilk_ppm = as.numeric(soilk_ppm),
+    soilp_ppm = as.numeric(soilp_ppm)
+  )
+```
 
 #-------USING 2023 AS A TEST SET-------
 ```{r}
@@ -345,39 +348,15 @@ test_full  <- read_csv("../data/test_full_weather.csv")
 #| warning: false
 
 train_dev <- train_full %>%
-  filter(year <= 2022)
-
-test_2023 <- train_full %>%
-  filter(year == 2023)
-```
-
-```{r}
-#| message: false
-#| warning: false
-
-train_full <- train_full %>%
+  filter(year <= 2023) %>%
   mutate(
     site = as.character(site),
     hybrid = as.character(hybrid),
     previous_crop = as.character(previous_crop)
   )
 
-test_full <- test_full %>%
-  mutate(
-    site = as.character(site),
-    hybrid = as.character(hybrid),
-    previous_crop = as.character(previous_crop)
-  )
-
-train_dev <- train_full %>%
-  filter(year <= 2022) %>%
-  mutate(
-    site = as.character(site),
-    hybrid = as.character(hybrid),
-    previous_crop = as.character(previous_crop)
-  )%>% 
-  mutate(across(soilp_h:soilp_ppm, as.numeric))
-
+train_dev_knn <- train_dev %>%
+  slice_sample(n = 20000)
 
 test_2023 <- train_full %>%
   filter(year == 2023) %>%
@@ -388,8 +367,7 @@ test_2023 <- train_full %>%
   )
 ```
 
-
-#---------CREATING THE RECIPE---------
+#---------CREATING THE RECIPES---------
 ```{r}
 library(recipes)
 corn_recipe_xgb <- recipe(yield ~ ., data = train_dev) %>%
@@ -398,13 +376,14 @@ corn_recipe_xgb <- recipe(yield ~ ., data = train_dev) %>%
   step_unknown(all_nominal_predictors()) %>%
   step_dummy(all_nominal_predictors())
 
-corn_recipe_rf <- recipe(yield ~ ., data = train_dev) %>%
+knn_recipe <- recipe(yield ~ ., data = train_dev) %>%
   step_rm(date_planted, date_harvested) %>%
   step_impute_median(all_numeric_predictors()) %>%
   step_unknown(all_nominal_predictors()) %>%
-  step_dummy(all_nominal_predictors())
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>%   
+  step_normalize(all_numeric_predictors())
 ```
-
 
 #---------FITTING XGBOOST---------
 ```{r}
@@ -428,12 +407,105 @@ xgb_wf <- workflow() %>%
 xgb_fit <- fit(xgb_wf, data = train_dev)
 
 xgb_pred_2023 <- predict(xgb_fit, test_2023) %>%
-  bind_cols(test_2023 %>% select(site, year, hybrid, yield))
+  bind_cols(test_2023 %>% 
+              select(site, year, hybrid, yield))
 
 xgb_metrics <- metrics(xgb_pred_2023, truth = yield, estimate = .pred)
 xgb_metrics
 ```
 
-#---------FITTING ---------
+#---------FITTING K-NEAREST NEIGHBORS---------
+```{r}
+install.packages("kknn")
+library(kknn)
 
+knn_spec <- nearest_neighbor(
+  neighbors = 5,
+  weight_func = "rectangular",
+  dist_power = 2
+) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+knn_wf <- workflow() %>%
+  add_recipe(knn_recipe) %>%
+  add_model(knn_spec)
+
+knn_fit <- fit(knn_wf, data = train_dev_knn)
+
+knn_pred_2023 <- predict(knn_fit, test_2023) %>%
+  bind_cols(test_2023 %>% 
+              select(site, year, hybrid, yield))
+
+knn_metrics <- metrics(knn_pred_2023, truth = yield, estimate = .pred)
+knn_metrics
+```
+
+#------------PLOTTING XGBOOST------------
+```{r}
+xgb_rmse <- xgb_metrics %>% 
+  filter(.metric == "rmse") %>% 
+  pull(.estimate)
+xgb_rsq  <- xgb_metrics %>% 
+  filter(.metric == "rsq") %>% 
+  pull(.estimate)
+
+ggplot(xgb_pred_2023, aes(x = yield, y = .pred)) +
+  geom_point(alpha = 0.4) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    title = "XGBoost: Predicted vs Observed Yield",
+    subtitle = paste0("RMSE = ", round(xgb_rmse, 2), " | R² = ", round(xgb_rsq, 3)),
+    x = "Observed Yield",
+    y = "Predicted Yield"
+  ) +
+  theme_minimal()
+```
+
+#------------PLOTTING K-NEAREST NEIGHBOR-----------
+```{r}
+knn_rmse <- knn_metrics %>% filter(.metric == "rmse") %>% pull(.estimate)
+knn_rsq  <- knn_metrics %>% filter(.metric == "rsq") %>% pull(.estimate)
+
+ggplot(knn_pred_2023, aes(x = yield, y = .pred)) +
+  geom_point(alpha = 0.4) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    title = "kNN: Predicted vs Observed Yield",
+    subtitle = paste0("RMSE = ", round(knn_rmse, 2), " | R² = ", round(knn_rsq, 3)),
+    x = "Observed Yield",
+    y = "Predicted Yield"
+  ) +
+  theme_minimal()
+```
+
+#--------------COMPARING MODELS------------
+```{r}
+model_comparison <- bind_rows(
+  xgb_metrics %>% mutate(model = "XGBoost"),
+  knn_metrics %>% mutate(model = "K-Nearest Neighbor (kNN)")
+)
+
+print(model_comparison)
+```
+
+#-----------REFIT FINAL MODEL ON ALL TRAINING DATA
+```{r}
+
+```
+
+#------------PREDICT 2024-------------------
+```{r}
+
+```
+
+#--------------SAVE PREDICTIONS------------
+```{r}
+
+```
+
+#-------------VARIABLE IMPORTANCE------------
+```{r}
+
+```
 
