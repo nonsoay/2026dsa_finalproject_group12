@@ -230,43 +230,49 @@ head(all_site_years)
 #| message: false
 #| warning: false
 
-get_daymet_one <- function(site, year, lat, lon) {
-  tryCatch({
-    out <- download_daymet(
-      site = paste0(site, "_", year),
-      lat = lat,
-      lon = lon,
-      start = year,
-      end = year,
-      internal = TRUE,
-      silent = TRUE
-    )
-
-    out$data %>%
-      as_tibble() %>%
-      mutate(
-        site = site,
-        year = year
-      )
-  }, error = function(e) {
-    message(paste("Skipping:", site, year, "lat =", lat, "lon =", lon))
-    return(NULL)
-  })
-}
-
-weather_list <- purrr::pmap(
-  all_site_years,
-  ~ get_daymet_one(site = ..1, year = ..2, lat = ..3, lon = ..4)
-)
-
-weather_daily <- bind_rows(weather_list)
-
+# get_daymet_one <- function(site, year, lat, lon) {
+#   tryCatch({
+#     out <- download_daymet(
+#       site = paste0(site, "_", year),
+#       lat = lat,
+#       lon = lon,
+#       start = year,
+#       end = year,
+#       internal = TRUE,
+#       silent = TRUE
+#     )
+# 
+#     out$data %>%
+#       as_tibble() %>%
+#       mutate(
+#         site = site,
+#         year = year
+#       )
+#   }, error = function(e) {
+#     message(paste("Skipping:", site, year, "lat =", lat, "lon =", lon))
+#     return(NULL)
+#   })
+# }
+# 
+# weather_list <- purrr::pmap(
+#   all_site_years,
+#   ~ get_daymet_one(site = ..1, year = ..2, lat = ..3, lon = ..4)
+# )
+# 
+# weather_daily <- bind_rows(weather_list)
+# 
+# 
+# write_csv(weather_daily,
+#           "../data/weather_daily.csv"
+#           ) #saving pulled weather data to avoid repeated pulling
 ```
 
 #------------FEATURE ENGINEERING WEATHER VARIABLES------------
 ```{r}
 #| message: false
 #| warning: false
+
+weather_daily <- read_csv("../data/weather_daily.csv") # first load saved weather data
 
 weather_daily <- weather_daily %>%
   mutate(
