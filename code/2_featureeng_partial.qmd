@@ -1,0 +1,77 @@
+---
+title: "Feature Engineering"
+format: html
+---
+
+
+# Setup  
+```{r}
+#| message: false
+#| warning: false
+
+library(tidyverse)
+
+here::here()
+knitr::purl("2_featureeng_partial.qmd", output = "2_sapelo_script.R", documentation = 0)
+```
+
+```{r}
+fieldweather <- read_cs(here("data", "fieldd12weatherdata.csv"))
+
+
+fieldweather <- read_csv("../data/fieldd12weatherdata.csv")
+
+soil <- read_csv("../data/training/training_soil.csv")
+
+trait <- read_csv("../data/training/training_trait.csv")
+
+fieldweather
+soil
+trait
+
+```
+
+Seperate site column in fieldsoil data into site and year and use site column to join the three dataset into one for ease of working with one dataset
+```{r}
+fieldsoil <- soil %>%
+  separate(site, into = c("site", "year"), sep = "_") %>% 
+  mutate(year = as.double(year)) #to keep the joining coulmn all in same data type in the different datset
+```
+
+
+```{r}
+fieldprp <- fieldweather %>% 
+  left_join(fieldsoil, 
+            by = c("year", "site")
+            ) %>% 
+  left_join(trait,
+            by = c("year", "site")
+            )
+
+   
+```
+
+
+
+# EDA  
+```{r}
+summary(fieldprp)
+```
+
+Let's select important variables/columns
+```{r}
+fieldprpty <- fieldprp %>% 
+  dplyr::select(dayl_s:grain_moisture, -replicate, -block, -hybrid, -date_planted, -date_harvested)
+```
+
+
+Let's create some density plots to explore the weather data distributions.  
+```{r}
+
+fieldprpty %>%
+  pivot_longer(cols = dayl_s:grain_moisture) %>%
+  ggplot(aes(x = value)) +
+  geom_density() +
+  facet_wrap(~name, scales = "free")
+
+```

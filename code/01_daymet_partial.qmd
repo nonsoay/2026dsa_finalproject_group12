@@ -1,0 +1,148 @@
+---
+title: "Daymet"
+format: html
+---
+
+# Setup  
+```{r}
+#| message: false
+#| warning: false
+
+#install.packages("sf")
+#install.packages("daymetr")
+#install.packages("remotes")
+#remotes::install_github("ropensci/USAboundaries")
+#remotes::install_github("ropensci/USAboundariesData")
+
+library(tidyverse)
+library(USAboundaries) # for US state boundaries
+library(sf) # for US map
+library(daymetr)
+```
+
+```{r}
+field12 <- read_csv("../data/training/training_meta.csv")
+
+field12
+```
+
+# EDA  
+```{r}
+summary(field12)
+``` 
+
+```{r unique years}
+field12 %>%
+  distinct(year)
+```
+
+
+```{r unique sites}
+field12 %>%
+  distinct(site)
+```
+
+
+# Daymet - one site-year  
+```{r one site-year}
+field12
+
+daymet_one <- download_daymet(site = field12$site[1], 
+                              lat = field12$latitude[1],
+                              lon = field12$longitude[1],
+                              start = field12$year[1],
+                              end = field12$year[1],
+                              simplify = T
+                              )
+
+daymet_one
+```
+
+
+
+```{r}
+daymet_one %>%
+  pivot_wider(names_from = measurement,
+              values_from = value)
+```
+
+
+
+```{r}
+fieldd12 <- field12 %>% 
+  filter (latitude >= 14.0749 & latitude <= 82.9143 &
+                  longitude >= -178.133 & longitude <= -53.0567)# %>% 
+  rename(lon = longitude,
+         lat = latitude)
+  
+  summary(fieldd12)
+```
+
+
+```{r}
+daymet_all <- fieldd12 %>% 
+    mutate(weather = pmap(list(.y = year,
+                             .site = site,
+                             .lat = latitude,
+                             .lon = longitude),
+                        function(.y, .site, .lat, .lon)
+                          download_daymet(
+                            site = .site,
+                            lat = .lat,
+                            lon = .lon,
+                            start = .y,
+                            end = .y,
+                            simplify = T,
+                            silent = T
+                          ) %>%
+                          rename(.year = year,
+                                 .site = site,
+                                 lon = longitude,
+                                 lat = latitude
+                                 )
+                          
+              
+                        ))
+
+daymet_all %>% (head)
+```
+
+
+Let's inspect weather data for the first site-year.  
+
+```{r}
+daymet_all$weather[1]
+```
+
+
+Now let's unnest the weather column.  
+```{r}
+daymet_all_unnes <- daymet_all %>% 
+  unnest(weather) %>%
+  pivot_wider(names_from = measurement,
+              values_from = value
+              ) %>%
+    janitor::clean_names()
+
+```
+Now, unnest the weather variable
+```{r}
+daymet_all_unnest <- daymet_all_unnes %>% 
+  unnest(dayl_s:vp_pa)
+
+daymet_all_unnest
+```
+
+
+
+
+# Exporting  
+  
+```{r}
+write_csv(daymet_all_unnest,
+          "../data/fieldd12weatherdata.csv"
+          )
+```
+
+ 
+
