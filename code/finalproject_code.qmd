@@ -648,8 +648,8 @@ xgb_pred_2024 <- predict(final_xgb_fit, new_data = final_test) %>%
   rename(predicted_yield = .pred)
 
 #knn_pred_2024 <- predict(final_knn_fit, new_data = final_test) %>%
-  bind_cols(final_test %>% select(site, year, hybrid)) %>%
-  rename(predicted_yield = .pred)
+  #bind_cols(final_test %>% select(site, year, hybrid)) %>%
+  #rename(predicted_yield = .pred)
 
 head(xgb_pred_2024)
 #head(knn_pred_2024)
@@ -658,7 +658,6 @@ head(xgb_pred_2024)
 #--------------SAVE PREDICTIONS------------
 ```{r}
 write_csv(xgb_pred_2024, "../output/xgb_predictions_2024.csv")
-write_csv(knn_pred_2024, "../output/knn_predictions_2024.csv")
 ```
 
 #-------------ADDING TO SUBMISSION FILE-------------
@@ -668,23 +667,17 @@ submission <- read_csv("../data/testing/testing_submission.csv", show_col_types 
 submission_xgb <- submission %>%
   mutate(yield_mg_ha = xgb_pred_2024$predicted_yield)
 
-submission_knn <- submission %>%
-  mutate(yield_mg_ha = knn_pred_2024$predicted_yield)
-
 write_csv(submission_xgb, "../output/final_submission_xgb.csv")
-write_csv(submission_knn, "../output/final_submission_knn.csv")
 
 head(submission_xgb)
 ```
-
 
 #-------------VARIABLE IMPORTANCE------------
 ```{r}
 final_xgb_fit %>%
   extract_fit_parsnip() %>%
-  vip(num_features = 15)
+  vip(num_features = 10)
 ```
-
 
 ```{r}
 knitr::purl("finalproject_code.qmd", output = "finalproject_script.R", documentation = 0)
