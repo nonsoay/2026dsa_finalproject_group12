@@ -627,6 +627,8 @@ final_train <- train_full %>%
   )
 
 final_xgb_fit <- fit(xgb_wf, data = final_train)
+saveRDS(final_xgb_fit, "../output/final_xgb_fit.rds")
+saveRDS(final_train, "../output/final_train_reference.rds")
 #final_knn_fit <- fit(knn_wf, data = final_train)
 ```
 
